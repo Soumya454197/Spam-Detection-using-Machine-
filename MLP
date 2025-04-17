@@ -1,0 +1,446 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+import string
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from google.colab import files
+import random
+from tqdm import tqdm
+from collections import Counter
+import os
+import math
+
+nltk.download('stopwords')
+
+def preprocess_text(text_series):
+    stemmer = PorterStemmer()
+    stop_words = set(stopwords.words('english'))
+    processed_texts = []
+    for text in text_series:
+        if isinstance(text, str):
+            text = text.lower()
+            text = re.sub(r'https?://\S+|www\.\S+', '', text)
+            text = text.translate(str.maketrans('', '', string.punctuation))
+            text = re.sub(r'\d+', '', text)
+            tokens = text.split()
+            important_words = {'free', 'win', 'won', 'call', 'text', 'txt', 'reply', 'prize', 'claim'}
+            tokens = [stemmer.stem(word) for word in tokens if word not in stop_words or word in important_words]
+            processed_text = ' '.join(tokens)
+        else:
+            processed_text = ""
+        processed_texts.append(processed_text)
+    return processed_texts
+
+class TfidfVectorizer:
+    def __init__(self, max_features=5000, min_df=2, max_df=0.95):
+        self.max_features = max_features
+        self.min_df = min_df
+        self.max_df = max_df
+        self.vocabulary = {}
+        self.idf = {}
+
+    def fit(self, documents):
+        doc_count = len(documents)
+        word_doc_freq = Counter()
+
+        for doc in documents:
+            words = set(doc.split())
+            for word in words:
+                word_doc_freq[word] += 1
+
+        min_doc_count = max(self.min_df, 1) if isinstance(self.min_df, int) else int(self.min_df * doc_count)
+        max_doc_count = doc_count if self.max_df == 1.0 else int(self.max_df * doc_count)
+
+        valid_words = [word for word, count in word_doc_freq.items()
+                      if min_doc_count <= count <= max_doc_count]
+
+        if len(valid_words) > self.max_features:
+            valid_words = sorted(valid_words,
+                               key=lambda word: word_doc_freq[word],
+                               reverse=True)[:self.max_features]
+
+        self.vocabulary = {word: idx for idx, word in enumerate(valid_words)}
+
+        self.idf = {word: np.log(doc_count / (1 + word_doc_freq[word])) for word in self.vocabulary}
+
+        return self
+
+    def transform(self, documents):
+        doc_vectors = []
+
+        for doc in documents:
+            word_counts = Counter(doc.split())
+
+            tfidf_vector = {}
+            doc_length = sum(word_counts.values())
+
+            if doc_length > 0:
+                for word, count in word_counts.items():
+                    if word in self.vocabulary:
+                        tf = count / doc_length
+                        tfidf_vector[self.vocabulary[word]] = tf * self.idf[word]
+
+            doc_vectors.append(tfidf_vector)
+
+        return doc_vectors
+
+    def fit_transform(self, documents):
+        self.fit(documents)
+        return self.transform(documents)
+
+    def get_feature_names(self):
+        return [word for word, idx in sorted(self.vocabulary.items(), key=lambda x: x[1])]
+
+    def sparse_to_dense(self, sparse_vector, vector_size=None):
+        if vector_size is None:
+            vector_size = len(self.vocabulary)
+
+        dense_vector = np.zeros(vector_size)
+        for idx, value in sparse_vector.items():
+            if idx < vector_size:
+                dense_vector[idx] = value
+
+        return dense_vector
+
+class MLP:
+    def __init__(self, input_size, hidden_sizes, output_size, learning_rate=0.01, max_iter=1000):
+        self.input_size = input_size
+        self.hidden_sizes = hidden_sizes
+        self.output_size = output_size
+        self.learning_rate = learning_rate
+        self.max_iter = max_iter
+
+        self.weights = []
+        self.biases = []
+
+        # Initialize weights and biases
+        layer_sizes = [input_size] + hidden_sizes + [output_size]
+
+        for i in range(len(layer_sizes) - 1):
+            # Xavier initialization for weights
+            limit = np.sqrt(6 / (layer_sizes[i] + layer_sizes[i+1]))
+            self.weights.append(np.random.uniform(-limit, limit, (layer_sizes[i], layer_sizes[i+1])))
+            self.biases.append(np.zeros(layer_sizes[i+1]))
+
+    def relu(self, x):
+        return np.maximum(0, x)
+
+    def relu_derivative(self, x):
+        return np.where(x > 0, 1, 0)
+
+    def sigmoid(self, x):
+        return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
+
+    def sigmoid_derivative(self, x):
+        sigmoid_x = self.sigmoid(x)
+        return sigmoid_x * (1 - sigmoid_x)
+
+    def forward(self, x):
+        activations = [x]
+        pre_activations = []
+
+        # Hidden layers with ReLU
+        for i in range(len(self.weights) - 1):
+            z = np.dot(activations[-1], self.weights[i]) + self.biases[i]
+            pre_activations.append(z)
+            activations.append(self.relu(z))
+
+        # Output layer with sigmoid
+        z = np.dot(activations[-1], self.weights[-1]) + self.biases[-1]
+        pre_activations.append(z)
+        activations.append(self.sigmoid(z))
+
+        return activations, pre_activations
+
+    def backward(self, x, y, activations, pre_activations):
+        # Number of samples
+        m = x.shape[0]
+
+        # Initialize gradients
+        dweights = [np.zeros_like(w) for w in self.weights]
+        dbiases = [np.zeros_like(b) for b in self.biases]
+
+        # Output layer error (binary cross-entropy derivative)
+        delta = activations[-1] - y.reshape(-1, 1)
+
+        # Backpropagate through layers
+        for i in range(len(self.weights) - 1, -1, -1):
+            # Compute gradients for weights and biases
+            dweights[i] = np.dot(activations[i].T, delta) / m
+            dbiases[i] = np.sum(delta, axis=0) / m
+
+            # Compute delta for previous layer (if not the input layer)
+            if i > 0:
+                delta = np.dot(delta, self.weights[i].T) * self.relu_derivative(pre_activations[i-1])
+
+        return dweights, dbiases
+
+    def update_parameters(self, dweights, dbiases):
+        for i in range(len(self.weights)):
+            self.weights[i] -= self.learning_rate * dweights[i]
+            self.biases[i] -= self.learning_rate * dbiases[i]
+
+    def fit(self, X, y):
+        X = np.array(X)
+        y = np.array(y)
+
+        for iteration in tqdm(range(self.max_iter)):
+            # Forward pass
+            activations, pre_activations = self.forward(X)
+
+            # Compute cost (binary cross-entropy)
+            y_pred = activations[-1]
+            epsilon = 1e-15  # To avoid log(0)
+            loss = -np.mean(y * np.log(y_pred + epsilon) + (1 - y) * np.log(1 - y_pred + epsilon))
+
+            # Print loss occasionally
+            if iteration % 100 == 0:
+                print(f"Iteration {iteration}, Loss: {loss:.6f}")
+
+            # Backward pass
+            dweights, dbiases = self.backward(X, y, activations, pre_activations)
+
+            # Update parameters
+            self.update_parameters(dweights, dbiases)
+
+        return self
+
+    def predict_proba(self, X):
+        X = np.array(X)
+        activations, _ = self.forward(X)
+        y_pred = activations[-1]
+        return np.hstack((1 - y_pred, y_pred))  # Return probabilities for both classes
+
+    def predict(self, X):
+        probabilities = self.predict_proba(X)
+        return np.argmax(probabilities, axis=1)
+
+def accuracy_score(y_true, y_pred):
+    correct = sum(1 for true, pred in zip(y_true, y_pred) if true == pred)
+    return correct / len(y_true)
+
+def confusion_matrix(y_true, y_pred):
+    tn = fp = fn = tp = 0
+
+    for true, pred in zip(y_true, y_pred):
+        if true == 0 and pred == 0:
+            tn += 1
+        elif true == 0 and pred == 1:
+            fp += 1
+        elif true == 1 and pred == 0:
+            fn += 1
+        else:
+            tp += 1
+
+    return np.array([[tn, fp], [fn, tp]])
+
+def classification_report(y_true, y_pred, target_names=None):
+    cm = confusion_matrix(y_true, y_pred)
+    tn, fp = cm[0]
+    fn, tp = cm[1]
+
+    accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+
+    precision_0 = tn / (tn + fn) if (tn + fn) > 0 else 0
+    recall_0 = tn / (tn + fp) if (tn + fp) > 0 else 0
+    f1_0 = 2 * precision_0 * recall_0 / (precision_0 + recall_0) if (precision_0 + recall_0) > 0 else 0
+
+    precision_1 = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall_1 = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1_1 = 2 * precision_1 * recall_1 / (precision_1 + recall_1) if (precision_1 + recall_1) > 0 else 0
+
+    macro_precision = (precision_0 + precision_1) / 2
+    macro_recall = (recall_0 + recall_1) / 2
+    macro_f1 = (f1_0 + f1_1) / 2
+
+    support_0 = sum(1 for y in y_true if y == 0)
+    support_1 = sum(1 for y in y_true if y == 1)
+
+    names = target_names if target_names else ["Class 0", "Class 1"]
+
+    report = (
+        f"              precision    recall  f1-score   support\n\n"
+        f"{names[0]:14} {precision_0:.2f}      {recall_0:.2f}      {f1_0:.2f}      {support_0}\n"
+        f"{names[1]:14} {precision_1:.2f}      {recall_1:.2f}      {f1_1:.2f}      {support_1}\n\n"
+        f"    accuracy                          {accuracy:.2f}      {support_0 + support_1}\n"
+        f"   macro avg   {macro_precision:.2f}      {macro_recall:.2f}      {macro_f1:.2f}      {support_0 + support_1}\n"
+    )
+
+    return report
+
+def plot_confusion_matrix(conf_matrix, class_names):
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        conf_matrix,
+        annot=True,
+        fmt='d',
+        cmap='Blues',
+        xticklabels=class_names,
+        yticklabels=class_names
+    )
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.show()
+
+def main():
+    print("Spam Detection using Custom MLP Neural Network")
+
+    print("\n1. Loading dataset...")
+    print("Please upload the 'spam.csv' file from the Kaggle SMS Spam Collection Dataset")
+
+    uploaded = files.upload()
+
+    csv_files = [f for f in os.listdir() if f.endswith('.csv') and 'spam' in f.lower()]
+
+    if not csv_files:
+        print("Error: No spam.csv file found. Please upload the correct file.")
+        return
+
+    csv_file = csv_files[0]
+    print(f"Using dataset file: {csv_file}")
+
+    try:
+        df = pd.read_csv(csv_file, encoding='latin-1')
+        df = df[['v1', 'v2']]
+        df.columns = ['label', 'message']
+        print(f"Dataset loaded successfully! Total messages: {len(df)}")
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
+
+    df['label_num'] = df.label.map({'ham': 0, 'spam': 1})
+
+    print("\nDataset Information:")
+    print(f"Total messages: {len(df)}")
+    print(f"Spam messages: {df[df.label_num == 1].shape[0]}")
+    print(f"Ham messages: {df[df.label_num == 0].shape[0]}")
+
+    print("\nSample messages:")
+    print(df.head())
+
+    plt.figure(figsize=(8, 6))
+    sns.countplot(x='label', data=df)
+    plt.title('Distribution of Ham vs Spam Messages')
+    plt.xlabel('Message Type')
+    plt.ylabel('Count')
+    plt.show()
+
+    print("\n2. Preprocessing and vectorizing text data...")
+
+    X = df['message'].values
+    y = df['label_num'].values
+
+    indices = list(range(len(X)))
+    random.seed(42)
+    random.shuffle(indices)
+
+    # Using a smaller subset for MLP to make it faster
+    max_samples = 2000
+    indices = indices[:max_samples]
+
+    split_point = int(0.8 * len(indices))
+    train_indices = indices[:split_point]
+    test_indices = indices[split_point:]
+
+    X_train = [X[i] for i in train_indices]
+    y_train = [y[i] for i in train_indices]
+    X_test = [X[i] for i in test_indices]
+    y_test = [y[i] for i in test_indices]
+
+    print(f"Training set size: {len(X_train)} samples")
+    print(f"Test set size: {len(X_test)} samples")
+
+    print("Preprocessing text...")
+    X_train_preprocessed = preprocess_text(X_train)
+    X_test_preprocessed = preprocess_text(X_test)
+
+    print("Vectorizing text data...")
+    vectorizer = TfidfVectorizer(max_features=500)  # Reduced features for MLP efficiency
+    X_train_vec_sparse = vectorizer.fit_transform(X_train_preprocessed)
+    X_test_vec_sparse = vectorizer.transform(X_test_preprocessed)
+
+    # Convert to dense arrays for MLP
+    print("Converting to dense arrays...")
+    X_train_vec = np.array([vectorizer.sparse_to_dense(x) for x in X_train_vec_sparse])
+    X_test_vec = np.array([vectorizer.sparse_to_dense(x) for x in X_test_vec_sparse])
+
+    # Normalize input features
+    X_mean = np.mean(X_train_vec, axis=0)
+    X_std = np.std(X_train_vec, axis=0) + 1e-8
+    X_train_vec = (X_train_vec - X_mean) / X_std
+    X_test_vec = (X_test_vec - X_mean) / X_std
+
+    print("\n3. Training MLP model...")
+
+    input_size = X_train_vec.shape[1]
+    hidden_sizes = [50]  # One hidden layer with 50 neurons
+    output_size = 1
+
+    mlp_model = MLP(
+        input_size=input_size,
+        hidden_sizes=hidden_sizes,
+        output_size=output_size,
+        learning_rate=0.01,
+        max_iter=500
+    )
+
+    print(f"Model architecture:")
+    print(f"- Input layer: {input_size} neurons")
+    print(f"- Hidden layers: {hidden_sizes}")
+    print(f"- Output layer: {output_size} neurons (binary classification)")
+
+    print("Training model (this will take some time)...")
+    mlp_model.fit(X_train_vec, y_train)
+    print("Training complete!")
+
+    print("\n4. Evaluating model...")
+
+    y_pred = mlp_model.predict(X_test_vec)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"Accuracy: {accuracy:.4f}")
+
+    report = classification_report(y_test, y_pred, target_names=['Ham', 'Spam'])
+    print("\nClassification Report:")
+    print(report)
+
+    cm = confusion_matrix(y_test, y_pred)
+    print("\nConfusion Matrix:")
+    print(cm)
+
+    plot_confusion_matrix(cm, ['Ham', 'Spam'])
+
+    print("\n5. Test with custom messages:")
+
+    test_messages = [
+        "Congratulations! You've won a $1000 gift card. Call now to claim your prize!",
+        "Hey, can we meet tomorrow for coffee?",
+        "URGENT: Your bank account has been compromised. Click here to verify your details.",
+        "I'll be home late tonight, please save dinner for me."
+    ]
+
+    test_messages_preprocessed = preprocess_text(test_messages)
+    test_messages_vec_sparse = vectorizer.transform(test_messages_preprocessed)
+    test_messages_vec = np.array([vectorizer.sparse_to_dense(x) for x in test_messages_vec_sparse])
+    test_messages_vec = (test_messages_vec - X_mean) / X_std
+
+    test_predictions = mlp_model.predict(test_messages_vec)
+    test_probabilities = mlp_model.predict_proba(test_messages_vec)
+
+    for i, (message, prediction, probability) in enumerate(zip(test_messages, test_predictions, test_probabilities)):
+        label = "Spam" if prediction == 1 else "Ham"
+        confidence = probability[1] if prediction == 1 else probability[0]
+
+        print(f"\nMessage {i+1}: \"{message}\"")
+        print(f"Prediction: {label} (Confidence: {confidence:.4f})")
+
+    print("\nSpam detection analysis complete!")
+
+if __name__ == "__main__":
+    main()

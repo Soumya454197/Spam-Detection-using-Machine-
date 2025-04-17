@@ -1,0 +1,592 @@
+# Spam Detection using MLP Neural Networks - Google Colab version
+# Using SMS Spam Collection Dataset from Kaggle
+ 
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+import string
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from google.colab import files
+ 
+# Download NLTK resources
+nltk.download('stopwords')
+ 
+# Text preprocessing function
+def preprocess_text(text_series):
+"""
+Preprocess text data for spam detection.
+"""
+# Initialize stemmer
+stemmer = PorterStemmer()
+# Get English stopwords
+stop_words = set(stopwords.words('english'))
+processed_texts = []
+for text in text_series:
+# Check if text is string (handle NaN values)
+if isinstance(text, str):
+# Convert to lowercase
+text = text.lower()
+# Remove URLs
+text = re.sub(r'https?://\S+|www\.\S+', '', text)
+# Remove punctuation
+text = text.translate(str.maketrans('', '', string.punctuation))
+# Remove numbers
+text = re.sub(r'\d+', '', text)
+# Tokenize
+tokens = text.split()
+# Remove stopwords and apply stemming
+# Keep some stopwords that might be important for spam detection
+important_words = {'free', 'win', 'won', 'call', 'text', 'txt', 'reply', 'prize', 'claim'}
+tokens = [stemmer.stem(word) for word in tokens if word not in stop_words or word in important_words]
+# Join tokens back into text
+processed_text = ' '.join(tokens)
+else:
+processed_text = ""
+processed_texts.append(processed_text)
+return processed_texts
+ 
+# Vectorize text data
+def vectorize_data(X_train, X_test, max_features=5000):
+"""
+Convert text data to TF-IDF vectors.
+"""
+# Preprocess text data
+X_train_preprocessed = preprocess_text(X_train)
+X_test_preprocessed = preprocess_text(X_test)
+# Initialize TF-IDF vectorizer
+vectorizer = TfidfVectorizer(
+max_features=max_features,
+min_df=2, # Minimum document frequency
+max_df=0.95, # Maximum document frequency
+ngram_range=(1, 2), # Use unigrams and bigrams
+sublinear_tf=True # Apply sublinear tf scaling
+)
+# Fit and transform training data
+X_train_vec = vectorizer.fit_transform(X_train_preprocessed)
+# Transform test data
+X_test_vec = vectorizer.transform(X_test_preprocessed)
+return vectorizer, X_train_vec, X_test_vec, X_train_preprocessed, X_test_preprocessed
+ 
+# Train MLP model
+def train_model(X_train, y_train, hidden_layer_sizes=(100,), activation='relu',
+max_iter=300, alpha=0.0001, random_state=42):
+"""
+Train an MLP classifier for spam detection.
+"""
+# Initialize the MLP model
+model = MLPClassifier(
+hidden_layer_sizes=hidden_layer_sizes,
+activation=activation,
+solver='adam', # Efficient for large datasets
+alpha=alpha,
+batch_size='auto',
+learning_rate='adaptive',
+max_iter=max_iter,
+random_state=random_state,
+early_stopping=True, # Use early stopping to prevent overfitting
+validation_fraction=0.1, # Use 10% of training data for validation
+n_iter_no_change=10 # Stop training if no improvement for 10 consecutive iterations
+)
+# Train the model
+model.fit(X_train, y_train)
+return model
+ 
+# Evaluate model
+def evaluate_model(model, X_test, y_test):
+"""
+Evaluate the trained model on test data.
+"""
+# Make predictions
+y_pred = model.predict(X_test)
+# Calculate accuracy
+accuracy = accuracy_score(y_test, y_pred)
+# Generate classification report
+report = classification_report(y_test, y_pred, target_names=['Ham', 'Spam'])
+# Generate confusion matrix
+conf_matrix = confusion_matrix(y_test, y_pred)
+return accuracy, report, conf_matrix, y_pred
+ 
+# Predict function for new texts
+def predict_text(model, vectorizer, text, preprocessed=False):
+"""
+Predict whether a text is spam or ham.
+"""
+# Preprocess if not already done
+if not preprocessed:
+processed_text = preprocess_text([text])[0]
+else:
+processed_text = text
+# Vectorize the text
+text_vec = vectorizer.transform([processed_text])
+# Make prediction
+prediction = model.predict(text_vec)[0]
+# Get probability
+probability = model.predict_proba(text_vec)[0]
+return prediction, probability, processed_text
+ 
+# Plot confusion matrix
+def plot_confusion_matrix(conf_matrix, class_names):
+"""
+Plot confusion matrix.
+"""
+plt.figure(figsize=(8, 6))
+# Create heatmap
+sns.heatmap(
+conf_matrix,
+annot=True,
+fmt='d',
+cmap='Blues',
+xticklabels=class_names,
+yticklabels=class_names
+)
+# Set labels
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.title('Confusion Matrix')
+plt.tight_layout()
+plt.show()
+ 
+# Plot feature importance
+def plot_feature_importance(vectorizer, text, prediction, top_n=10):
+"""
+Plot feature importance for a specific prediction.
+"""
+# Get feature names
+feature_names = vectorizer.get_feature_names_out()
+# Convert text to vector
+text_vector = vectorizer.transform([text])
+# Get non-zero features
+non_zero_indices = text_vector.nonzero()[1]
+non_zero_values = text_vector.data
+# Create a list of (feature_name, value) pairs
+feature_values = [(feature_names[idx], non_zero_values[i]) for i, idx in enumerate(non_zero_indices)]
+# Sort by value
+feature_values.sort(key=lambda x: x[1], reverse=True)
+# Get top features
+top_features = feature_values[:top_n]
+# Prepare data for plotting
+feature_names = [f[0] for f in top_features]
+feature_values = [f[1] for f in top_features]
+# Create plot
+plt.figure(figsize=(10, 6))
+# Set colors based on prediction
+colors = ['green' if prediction == 0 else 'red'] * len(feature_names)
+# Create horizontal bar chart
+bars = plt.barh(feature_names, feature_values, color=colors)
+# Add labels
+plt.xlabel('TF-IDF Score')
+plt.title(f'Top {top_n} Features for {"Ham" if prediction == 0 else "Spam"} Classification')
+# Add values on bars
+for bar in bars:
+width = bar.get_width()
+plt.text(width + 0.01, bar.get_y() + bar.get_height()/2, f'{width:.2f}',
+ha='left', va='center')
+plt.tight_layout()
+plt.show()
+ 
+# Main function to run the spam detection pipeline
+def main():
+print("Spam Detection using MLP Neural Networks")
+# 1. File Upload and Data Loading
+print("\n1. Loading dataset...")
+print("Please upload the 'spam.csv' file from the Kaggle SMS Spam Collection Dataset")
+# For Google Colab: Upload the dataset
+uploaded = files.upload() # This will prompt the user to upload the CSV file
+if 'spam.csv' not in uploaded:
+print("Error: 'spam.csv' file not found. Please upload the correct file.")
+return
+try:
+# Load the uploaded CSV file
+df = pd.read_csv('spam.csv', encoding='latin-1')
+# Keep only relevant columns (v1=label, v2=message)
+df = df[['v1', 'v2']]
+df.columns = ['label', 'message']
+print(f"Dataset loaded successfully! Total messages: {len(df)}")
+except Exception as e:
+print(f"Error loading dataset: {e}")
+return
+# Convert spam/ham to 1/0
+df['label_num'] = df.label.map({'ham': 0, 'spam': 1})
+# Display dataset info
+print("\nDataset Information:")
+print(f"Total messages: {len(df)}")
+print(f"Spam messages: {df[df.label_num == 1].shape[0]}")
+print(f"Ham messages: {df[df.label_num == 0].shape[0]}")
+# Sample of the dataset
+print("\nSample messages:")
+print(df.head())
+# Data visualization: distribution of spam and ham messages
+plt.figure(figsize=(8, 6))
+sns.countplot(x='label', data=df, palette=['green', 'red'])
+plt.title('Distribution of Ham vs Spam Messages')
+plt.xlabel('Message Type')
+plt.ylabel('Count')
+plt.show()
+# 2. Text Preprocessing and Vectorization
+print("\n2. Preprocessing and vectorizing text data...")
+# Split the data
+X = df['message']
+y = df['label_num']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Vectorize the data
+vectorizer, X_train_vec, X_test_vec, X_train_preprocessed, X_test_preprocessed = vectorize_data(X_train, X_test)
+print(f"Training data shape: {X_train_vec.shape}")
+print(f"Test data shape: {X_test_vec.shape}")
+# 3. Model Training
+print("\n3. Training MLP model...")
+# Set model parameters
+hidden_layer_sizes = (100,) # Single hidden layer with 100 neurons
+activation = 'relu'
+max_iter = 300
+alpha = 0.0001
+print(f"Model parameters:")
+print(f"- Hidden layer sizes: {hidden_layer_sizes}")
+print(f"- Activation function: {activation}")
+print(f"- Max iterations: {max_iter}")
+print(f"- Alpha (regularization): {alpha}")
+# Train the model
+model = train_model(
+X_train_vec,
+y_train,
+hidden_layer_sizes=hidden_layer_sizes,
+activation=activation,
+max_iter=max_iter,
+alpha=alpha
+)
+# 4. Model Evaluation
+print("\n4. Evaluating model...")
+accuracy, report, conf_matrix, y_pred = evaluate_model(model, X_test_vec, y_test)
+print(f"Accuracy: {accuracy:.4f}")
+print("\nClassification Report:")
+print(report)
+# Plot confusion matrix
+print("\nConfusion Matrix:")
+plot_confusion_matrix(conf_matrix, ['Ham', 'Spam'])
+# 5. Test with custom messages
+print("\n5. Test with custom messages:")
+test_messages = [
+"Congratulations! You've won a $1000 gift card. Call now to claim your prize!",
+"Hey, can we meet tomorrow for coffee?",
+"URGENT: Your bank account has been compromised. Click here to verify your details.",
+"I'll be home late tonight, please save dinner for me."
+]
+for i, message in enumerate(test_messages):
+prediction, probability, processed_text = predict_text(model, vectorizer, message)
+result = "Spam" if prediction == 1 else "Ham"
+confidence = probability[1] if prediction == 1 else probability[0]
+print(f"\nMessage {i+1}: \"{message}\"")
+print(f"Prediction: {result} (Confidence: {confidence:.4f})")
+# Plot feature importance for this message
+if i == 0 or i == 2: # Show for known spam messages
+print("\nFeature Importance Analysis:")
+plot_feature_importance(vectorizer, processed_text, prediction)
+print("\nSpam detection analysis complete!")
+ 
+# Run the main function
+if __name__ == "__main__":
+main()
+# Spam Detection using MLP Neural Networks - Google Colab version
+# Using SMS Spam Collection Dataset from Kaggle
+ 
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+import string
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from google.colab import files
+ 
+# Download NLTK resources
+nltk.download('stopwords')
+ 
+# Text preprocessing function
+def preprocess_text(text_series):
+"""
+Preprocess text data for spam detection.
+"""
+# Initialize stemmer
+stemmer = PorterStemmer()
+# Get English stopwords
+stop_words = set(stopwords.words('english'))
+processed_texts = []
+for text in text_series:
+# Check if text is string (handle NaN values)
+if isinstance(text, str):
+# Convert to lowercase
+text = text.lower()
+# Remove URLs
+text = re.sub(r'https?://\S+|www\.\S+', '', text)
+# Remove punctuation
+text = text.translate(str.maketrans('', '', string.punctuation))
+# Remove numbers
+text = re.sub(r'\d+', '', text)
+# Tokenize
+tokens = text.split()
+# Remove stopwords and apply stemming
+# Keep some stopwords that might be important for spam detection
+important_words = {'free', 'win', 'won', 'call', 'text', 'txt', 'reply', 'prize', 'claim'}
+tokens = [stemmer.stem(word) for word in tokens if word not in stop_words or word in important_words]
+# Join tokens back into text
+processed_text = ' '.join(tokens)
+else:
+processed_text = ""
+processed_texts.append(processed_text)
+return processed_texts
+ 
+# Vectorize text data
+def vectorize_data(X_train, X_test, max_features=5000):
+"""
+Convert text data to TF-IDF vectors.
+"""
+# Preprocess text data
+X_train_preprocessed = preprocess_text(X_train)
+X_test_preprocessed = preprocess_text(X_test)
+# Initialize TF-IDF vectorizer
+vectorizer = TfidfVectorizer(
+max_features=max_features,
+min_df=2, # Minimum document frequency
+max_df=0.95, # Maximum document frequency
+ngram_range=(1, 2), # Use unigrams and bigrams
+sublinear_tf=True # Apply sublinear tf scaling
+)
+# Fit and transform training data
+X_train_vec = vectorizer.fit_transform(X_train_preprocessed)
+# Transform test data
+X_test_vec = vectorizer.transform(X_test_preprocessed)
+return vectorizer, X_train_vec, X_test_vec, X_train_preprocessed, X_test_preprocessed
+ 
+# Train MLP model
+def train_model(X_train, y_train, hidden_layer_sizes=(100,), activation='relu',
+max_iter=300, alpha=0.0001, random_state=42):
+"""
+Train an MLP classifier for spam detection.
+"""
+# Initialize the MLP model
+model = MLPClassifier(
+hidden_layer_sizes=hidden_layer_sizes,
+activation=activation,
+solver='adam', # Efficient for large datasets
+alpha=alpha,
+batch_size='auto',
+learning_rate='adaptive',
+max_iter=max_iter,
+random_state=random_state,
+early_stopping=True, # Use early stopping to prevent overfitting
+validation_fraction=0.1, # Use 10% of training data for validation
+n_iter_no_change=10 # Stop training if no improvement for 10 consecutive iterations
+)
+# Train the model
+model.fit(X_train, y_train)
+return model
+ 
+# Evaluate model
+def evaluate_model(model, X_test, y_test):
+"""
+Evaluate the trained model on test data.
+"""
+# Make predictions
+y_pred = model.predict(X_test)
+# Calculate accuracy
+accuracy = accuracy_score(y_test, y_pred)
+# Generate classification report
+report = classification_report(y_test, y_pred, target_names=['Ham', 'Spam'])
+# Generate confusion matrix
+conf_matrix = confusion_matrix(y_test, y_pred)
+return accuracy, report, conf_matrix, y_pred
+ 
+# Predict function for new texts
+def predict_text(model, vectorizer, text, preprocessed=False):
+"""
+Predict whether a text is spam or ham.
+"""
+# Preprocess if not already done
+if not preprocessed:
+processed_text = preprocess_text([text])[0]
+else:
+processed_text = text
+# Vectorize the text
+text_vec = vectorizer.transform([processed_text])
+# Make prediction
+prediction = model.predict(text_vec)[0]
+# Get probability
+probability = model.predict_proba(text_vec)[0]
+return prediction, probability, processed_text
+ 
+# Plot confusion matrix
+def plot_confusion_matrix(conf_matrix, class_names):
+"""
+Plot confusion matrix.
+"""
+plt.figure(figsize=(8, 6))
+# Create heatmap
+sns.heatmap(
+conf_matrix,
+annot=True,
+fmt='d',
+cmap='Blues',
+xticklabels=class_names,
+yticklabels=class_names
+)
+# Set labels
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.title('Confusion Matrix')
+plt.tight_layout()
+plt.show()
+ 
+# Plot feature importance
+def plot_feature_importance(vectorizer, text, prediction, top_n=10):
+"""
+Plot feature importance for a specific prediction.
+"""
+# Get feature names
+feature_names = vectorizer.get_feature_names_out()
+# Convert text to vector
+text_vector = vectorizer.transform([text])
+# Get non-zero features
+non_zero_indices = text_vector.nonzero()[1]
+non_zero_values = text_vector.data
+# Create a list of (feature_name, value) pairs
+feature_values = [(feature_names[idx], non_zero_values[i]) for i, idx in enumerate(non_zero_indices)]
+# Sort by value
+feature_values.sort(key=lambda x: x[1], reverse=True)
+# Get top features
+top_features = feature_values[:top_n]
+# Prepare data for plotting
+feature_names = [f[0] for f in top_features]
+feature_values = [f[1] for f in top_features]
+# Create plot
+plt.figure(figsize=(10, 6))
+# Set colors based on prediction
+colors = ['green' if prediction == 0 else 'red'] * len(feature_names)
+# Create horizontal bar chart
+bars = plt.barh(feature_names, feature_values, color=colors)
+# Add labels
+plt.xlabel('TF-IDF Score')
+plt.title(f'Top {top_n} Features for {"Ham" if prediction == 0 else "Spam"} Classification')
+# Add values on bars
+for bar in bars:
+width = bar.get_width()
+plt.text(width + 0.01, bar.get_y() + bar.get_height()/2, f'{width:.2f}',
+ha='left', va='center')
+plt.tight_layout()
+plt.show()
+ 
+# Main function to run the spam detection pipeline
+def main():
+print("Spam Detection using MLP Neural Networks")
+# 1. File Upload and Data Loading
+print("\n1. Loading dataset...")
+print("Please upload the 'spam.csv' file from the Kaggle SMS Spam Collection Dataset")
+# For Google Colab: Upload the dataset
+uploaded = files.upload() # This will prompt the user to upload the CSV file
+if 'spam.csv' not in uploaded:
+print("Error: 'spam.csv' file not found. Please upload the correct file.")
+return
+try:
+# Load the uploaded CSV file
+df = pd.read_csv('spam.csv', encoding='latin-1')
+# Keep only relevant columns (v1=label, v2=message)
+df = df[['v1', 'v2']]
+df.columns = ['label', 'message']
+print(f"Dataset loaded successfully! Total messages: {len(df)}")
+except Exception as e:
+print(f"Error loading dataset: {e}")
+return
+# Convert spam/ham to 1/0
+df['label_num'] = df.label.map({'ham': 0, 'spam': 1})
+# Display dataset info
+print("\nDataset Information:")
+print(f"Total messages: {len(df)}")
+print(f"Spam messages: {df[df.label_num == 1].shape[0]}")
+print(f"Ham messages: {df[df.label_num == 0].shape[0]}")
+# Sample of the dataset
+print("\nSample messages:")
+print(df.head())
+# Data visualization: distribution of spam and ham messages
+plt.figure(figsize=(8, 6))
+sns.countplot(x='label', data=df, palette=['green', 'red'])
+plt.title('Distribution of Ham vs Spam Messages')
+plt.xlabel('Message Type')
+plt.ylabel('Count')
+plt.show()
+# 2. Text Preprocessing and Vectorization
+print("\n2. Preprocessing and vectorizing text data...")
+# Split the data
+X = df['message']
+y = df['label_num']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Vectorize the data
+vectorizer, X_train_vec, X_test_vec, X_train_preprocessed, X_test_preprocessed = vectorize_data(X_train, X_test)
+print(f"Training data shape: {X_train_vec.shape}")
+print(f"Test data shape: {X_test_vec.shape}")
+# 3. Model Training
+print("\n3. Training MLP model...")
+# Set model parameters
+hidden_layer_sizes = (100,) # Single hidden layer with 100 neurons
+activation = 'relu'
+max_iter = 300
+alpha = 0.0001
+print(f"Model parameters:")
+print(f"- Hidden layer sizes: {hidden_layer_sizes}")
+print(f"- Activation function: {activation}")
+print(f"- Max iterations: {max_iter}")
+print(f"- Alpha (regularization): {alpha}")
+# Train the model
+model = train_model(
+X_train_vec,
+y_train,
+hidden_layer_sizes=hidden_layer_sizes,
+activation=activation,
+max_iter=max_iter,
+alpha=alpha
+)
+# 4. Model Evaluation
+print("\n4. Evaluating model...")
+accuracy, report, conf_matrix, y_pred = evaluate_model(model, X_test_vec, y_test)
+print(f"Accuracy: {accuracy:.4f}")
+print("\nClassification Report:")
+print(report)
+# Plot confusion matrix
+print("\nConfusion Matrix:")
+plot_confusion_matrix(conf_matrix, ['Ham', 'Spam'])
+# 5. Test with custom messages
+print("\n5. Test with custom messages:")
+test_messages = [
+"Congratulations! You've won a $1000 gift card. Call now to claim your prize!",
+"Hey, can we meet tomorrow for coffee?",
+"URGENT: Your bank account has been compromised. Click here to verify your details.",
+"I'll be home late tonight, please save dinner for me."
+]
+for i, message in enumerate(test_messages):
+prediction, probability, processed_text = predict_text(model, vectorizer, message)
+result = "Spam" if prediction == 1 else "Ham"
+confidence = probability[1] if prediction == 1 else probability[0]
+print(f"\nMessage {i+1}: \"{message}\"")
+print(f"Prediction: {result} (Confidence: {confidence:.4f})")
+# Plot feature importance for this message
+if i == 0 or i == 2: # Show for known spam messages
+print("\nFeature Importance Analysis:")
+plot_feature_importance(vectorizer, processed_text, prediction)
+print("\nSpam detection analysis complete!")
+ 
+# Run the main function
+if __name__ == "__main__":
+main()
